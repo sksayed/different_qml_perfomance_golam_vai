@@ -8,6 +8,10 @@ import sys
 import time
 from pathlib import Path
 
+import json
+import yaml
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -21,7 +25,6 @@ def main():
         return 1
     name = sys.argv[1].strip().lower()
 
-    import yaml
     from data.dataset import get_dataset
     from models import get_models
 
@@ -30,11 +33,16 @@ def main():
 
     framework = cfg.get("framework", "pennylane").lower()
     data_dir = ROOT / cfg.get("data_dir", "CIC_iomt_dataset")
-    train_path = data_dir / cfg.get("train_file", "CIC_IoMT_2024_WiFi_MQTT_train.parquet")
+    # Test set: always use the original hold-out file (Parquet preferred, CSV fallback)
     test_path = data_dir / cfg.get("test_file", "CIC_IoMT_2024_WiFi_MQTT_test.parquet")
-    if not train_path.exists():
-        train_path = data_dir / "CIC_IoMT_2024_WiFi_MQTT_train.csv"
+    if not test_path.exists():
         test_path = data_dir / "CIC_IoMT_2024_WiFi_MQTT_test.csv"
+
+    # Pre-generated training datasets:
+    # - CIC_IoMT_2024_Variational.parquet: for VQC/QMLP/QNN (larger, capped per class)
+    # - CIC_IoMT_2024_QSVM.parquet:       for QSVM (smaller, stratified ~5k rows)
+    var_train_path = data_dir / "CIC_IoMT_2024_Variational.parquet"
+    qsvm_train_path = data_dir / "CIC_IoMT_2024_QSVM.parquet"
 
     model_classes = get_models(framework)
     n_qubits = cfg.get("n_qubits", 4)
@@ -44,10 +52,35 @@ def main():
         return 1
     ModelClass = model_map[name]
 
+    # Choose the appropriate training dataset based on the requested model.
+    if framework == "pennylane":
+        if name == "pennylane_qsvm":
+            train_path = qsvm_train_path
+        else:
+            train_path = var_train_path
+    else:
+        # For future Qiskit models:
+        #   - "qsvm"  -> QSVM dataset
+        #   - others  -> Variational dataset
+        if name == "qsvm":
+            train_path = qsvm_train_path
+        else:
+            train_path = var_train_path
+
+    if not train_path.exists():
+        print(
+            f"Training dataset not found at {train_path}. "
+            "Run `python -m data.generate_variational_qsvm_datasets` first."
+        )
+        return 1
+
     X_train, y_train, X_test, y_test, _ = get_dataset(
         train_path=train_path,
         test_path=test_path,
-        n_train=cfg.get("n_train"),
+        # Use the full pre-generated training datasets (Variational / QSVM).
+        # They are already sized and balanced appropriately, so we ignore
+        # any n_train limit from the config here.
+        n_train=None,
         n_test=cfg.get("n_test"),
         n_components=cfg.get("n_components"),
         random_state=cfg.get("random_state", 42),
@@ -87,7 +120,6 @@ def main():
             optimizer=optimizer,
             random_state=random_state,
         )
-    from sklearn.metrics import accuracy_score, f1_score
 
     t0 = time.perf_counter()
     model.fit(X_train, y_train)
@@ -99,10 +131,9 @@ def main():
 
     acc = float(accuracy_score(y_test, pred))
     f1 = float(f1_score(y_test, pred, average="weighted"))
-    print(name, "accuracy:", acc, "f1:", f1)
-
-    # Save metrics JSON in this run's directory (so evaluate.py can see it)
-    import json
+    prec = float(precision_score(y_test, pred, average="weighted", zero_division=0))
+    rec = float(recall_score(y_test, pred, average="weighted", zero_division=0))
+    print(name, "accuracy:", acc, "f1:", f1, "recall:", rec)
 
     metrics_dir = run_dir / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
@@ -111,6 +142,8 @@ def main():
         "framework": framework,
         "accuracy": acc,
         "f1_weighted": f1,
+        "precision_weighted": prec,
+        "recall_weighted": rec,
         "train_time_sec": round(train_time, 2),
         "inference_time_sec": round(infer_time, 2),
         "n_train": len(y_train),

@@ -46,6 +46,26 @@ def _resolve_paths(
     return csv_train, csv_test
 
 
+def _collapse_label(raw_label: str) -> str:
+    """
+    Collapse fine-grained attack labels into 4 meta-classes:
+    - 'DDoS'   : any label containing 'DDoS'
+    - 'DoS'    : any label containing 'DoS' but not 'DDoS'
+    - 'Benign' : any label starting with 'Benign'
+    - 'Other'  : everything else (e.g., Recon, ARP spoofing, MQTT malformed data)
+    """
+    if raw_label is None:
+        return "Other"
+    s = str(raw_label)
+    if "DDoS" in s:
+        return "DDoS"
+    if "DoS" in s:
+        return "DoS"
+    if s.startswith("Benign"):
+        return "Benign"
+    return "Other"
+
+
 def _load_file(path: Path, n_samples: Optional[int] = None) -> pd.DataFrame:
     """Load a single file as DataFrame (Parquet or CSV)."""
     path = Path(path)
@@ -53,10 +73,12 @@ def _load_file(path: Path, n_samples: Optional[int] = None) -> pd.DataFrame:
         raise FileNotFoundError(f"Data file not found: {path}")
 
     if path.suffix.lower() == ".parquet":
+        # For Parquet, always load fully; it's already columnar and efficient
         df = pd.read_parquet(path)
     else:
-        # CSV: read in chunks if n_samples set to avoid huge memory
-        df = pd.read_csv(path, nrows=n_samples, low_memory=False)
+        # For CSV, load the full file, then randomly sample if requested.
+        # This avoids temporal bias from only reading the first n_samples rows.
+        df = pd.read_csv(path, low_memory=False)
 
     if n_samples and len(df) > n_samples:
         df = df.sample(n=n_samples, random_state=42).reset_index(drop=True)
@@ -87,9 +109,11 @@ def load_cic_iomt_2024(
 
     feature_cols = [c for c in train_df.columns if c != label_column]
     X_train = train_df[feature_cols].copy()
-    y_train = train_df[label_column].astype(str)
     X_test = test_df[feature_cols].copy()
-    y_test = test_df[label_column].astype(str)
+
+    # Collapse the original fine-grained labels to 4 meta-classes
+    y_train = train_df[label_column].astype(str).map(_collapse_label)
+    y_test = test_df[label_column].astype(str).map(_collapse_label)
 
     return X_train, y_train, X_test, y_test
 

@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 import yaml
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -27,13 +27,17 @@ def main():
     cfg = load_config()
     framework = cfg.get("framework", "pennylane").lower()
     data_dir = ROOT / cfg.get("data_dir", "CIC_iomt_dataset")
-    train_file = cfg.get("train_file", "CIC_IoMT_2024_WiFi_MQTT_train.parquet")
+    # Test set: always use the original hold-out file (Parquet preferred, CSV fallback)
     test_file = cfg.get("test_file", "CIC_IoMT_2024_WiFi_MQTT_test.parquet")
-    train_path = data_dir / train_file
     test_path = data_dir / test_file
-    if not train_path.exists():
-        train_path = data_dir / "CIC_IoMT_2024_WiFi_MQTT_train.csv"
+    if not test_path.exists():
         test_path = data_dir / "CIC_IoMT_2024_WiFi_MQTT_test.csv"
+
+    # Pre-generated training datasets:
+    # - CIC_IoMT_2024_Variational.parquet: for VQC/QMLP/QNN (larger, capped per class)
+    # - CIC_IoMT_2024_QSVM.parquet:       for QSVM (smaller, stratified ~5k rows)
+    var_train_path = data_dir / "CIC_IoMT_2024_Variational.parquet"
+    qsvm_train_path = data_dir / "CIC_IoMT_2024_QSVM.parquet"
 
     n_train = cfg.get("n_train")
     n_test = cfg.get("n_test")
@@ -58,20 +62,46 @@ def main():
     checkpoints_dir = run_dir / "checkpoints"
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading data (framework={framework})...")
-    X_train, y_train, X_test, y_test, le = get_dataset(
-        train_path=train_path,
-        test_path=test_path,
-        n_train=n_train,
-        n_test=n_test,
-        n_components=n_components,
-        random_state=random_state,
-    )
-    print(f"Train {X_train.shape[0]}, Test {X_test.shape[0]}, features {X_train.shape[1]}, classes {len(le.classes_)}")
-
     model_classes = get_models(framework)
     for ModelClass in model_classes:
         try:
+            # Decide which training dataset to use for this model.
+            # For PennyLane:
+            #   - PennyLaneQSVM -> QSVM dataset (~5k, kernel-based)
+            #   - PennyLaneVQC/QMLP/QNN -> Variational dataset (~O(80k))
+            if framework == "pennylane":
+                model_name = ModelClass.__name__
+                is_qsvm = model_name == "PennyLaneQSVM"
+            else:
+                # For future Qiskit models, match by class name if available.
+                model_name = ModelClass.__name__
+                is_qsvm = model_name.lower().startswith("qsvm")
+
+            train_path_for_model = qsvm_train_path if is_qsvm else var_train_path
+
+            if not train_path_for_model.exists():
+                raise FileNotFoundError(
+                    f"Training dataset not found at {train_path_for_model}. "
+                    "Run `python -m data.generate_variational_qsvm_datasets` first."
+                )
+
+            print(f"\nLoading data for {ModelClass.__name__} from {train_path_for_model.name} (framework={framework})...")
+            X_train, y_train, X_test, y_test, le = get_dataset(
+                train_path=train_path_for_model,
+                test_path=test_path,
+                # Use the full pre-generated training datasets (Variational / QSVM).
+                # They are already sized and balanced appropriately, so we ignore
+                # any n_train limit from the config here.
+                n_train=None,
+                n_test=n_test,
+                n_components=n_components,
+                random_state=random_state,
+            )
+            print(
+                f"  Data: Train {X_train.shape[0]}, Test {X_test.shape[0]}, "
+                f"features {X_train.shape[1]}, classes {len(le.classes_)}"
+            )
+
             if framework == "pennylane":
                 model = ModelClass(
                     n_qubits=n_qubits,
@@ -101,11 +131,15 @@ def main():
             infer_time = time.perf_counter() - t0
             acc = float(accuracy_score(y_test, y_pred))
             f1 = float(f1_score(y_test, y_pred, average="weighted"))
+            prec = float(precision_score(y_test, y_pred, average="weighted", zero_division=0))
+            rec = float(recall_score(y_test, y_pred, average="weighted", zero_division=0))
             metrics = {
                 "model": name,
                 "framework": framework,
                 "accuracy": acc,
                 "f1_weighted": f1,
+                 "precision_weighted": prec,
+                 "recall_weighted": rec,
                 "train_time_sec": round(train_time, 2),
                 "inference_time_sec": round(infer_time, 2),
                 "n_train": len(y_train),
