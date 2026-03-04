@@ -5,6 +5,7 @@ Train a single model. Usage:
   python -m experiments.train_single qsvm   (requires Qiskit)
 """
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,6 +59,16 @@ def main():
     optimizer = cfg.get("optimizer", "COBYLA")
     random_state = cfg.get("random_state", 42)
 
+    # Create per-run timestamped directory under results/
+    base_results = ROOT / cfg.get("results_dir", "results")
+    base_results.mkdir(parents=True, exist_ok=True)
+    run_id = time.strftime("run_%Y%m%d_%H%M%S")
+    run_dir = base_results / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpoints_dir = run_dir / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+
     if framework == "pennylane":
         model = ModelClass(
             n_qubits=n_qubits,
@@ -76,10 +87,46 @@ def main():
             optimizer=optimizer,
             random_state=random_state,
         )
-    model.fit(X_train, y_train)
     from sklearn.metrics import accuracy_score, f1_score
+
+    t0 = time.perf_counter()
+    model.fit(X_train, y_train)
+    train_time = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     pred = model.predict(X_test)
-    print(name, "accuracy:", accuracy_score(y_test, pred), "f1:", f1_score(y_test, pred, average="weighted"))
+    infer_time = time.perf_counter() - t0
+
+    acc = float(accuracy_score(y_test, pred))
+    f1 = float(f1_score(y_test, pred, average="weighted"))
+    print(name, "accuracy:", acc, "f1:", f1)
+
+    # Save metrics JSON in this run's directory (so evaluate.py can see it)
+    import json
+
+    metrics_dir = run_dir / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    metrics = {
+        "model": name,
+        "framework": framework,
+        "accuracy": acc,
+        "f1_weighted": f1,
+        "train_time_sec": round(train_time, 2),
+        "inference_time_sec": round(infer_time, 2),
+        "n_train": len(y_train),
+        "n_test": len(y_test),
+    }
+    out = metrics_dir / f"{name}_metrics.json"
+    with open(out, "w") as f:
+        json.dump(metrics, f, indent=2)
+    print("Saved metrics to", out)
+
+    ckpt_path = checkpoints_dir / f"{name}.pkl"
+    try:
+        model.save(ckpt_path)
+        print("Saved checkpoint to", ckpt_path)
+    except Exception as exc:
+        print("Warning: could not save checkpoint:", exc)
     return 0
 
 

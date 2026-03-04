@@ -45,9 +45,18 @@ def main():
     optimizer = cfg.get("optimizer", "COBYLA")
     step_size = cfg.get("step_size", 0.1)
     random_state = cfg.get("random_state", 42)
-    metrics_dir = Path(cfg.get("metrics_dir", "results/metrics"))
-    metrics_dir = ROOT / metrics_dir if not metrics_dir.is_absolute() else metrics_dir
+
+    # Create per-run timestamped directory under results/
+    base_results = ROOT / cfg.get("results_dir", "results")
+    base_results.mkdir(parents=True, exist_ok=True)
+    run_id = time.strftime("run_%Y%m%d_%H%M%S")
+    run_dir = base_results / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics_dir = run_dir / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
+    checkpoints_dir = run_dir / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading data (framework={framework})...")
     X_train, y_train, X_test, y_test, le = get_dataset(
@@ -82,6 +91,7 @@ def main():
                     random_state=random_state,
                 )
             name = model.name
+            print(f"\n=== Model - {name} ===")
             print(f"Training {name}...")
             t0 = time.perf_counter()
             model.fit(X_train, y_train)
@@ -105,12 +115,21 @@ def main():
             with open(out, "w") as f:
                 json.dump(metrics, f, indent=2)
             print(f"  {name}: acc={acc:.4f} f1={f1:.4f} train_time={train_time:.1f}s")
+
+            # Save model checkpoint, if supported
+            ckpt_path = checkpoints_dir / f"{name}.pkl"
+            try:
+                model.save(ckpt_path)
+                print(f"  {name}: checkpoint saved to {ckpt_path}")
+            except Exception as save_exc:
+                print(f"  {name}: warning - could not save checkpoint: {save_exc}")
         except Exception as exc:
             # Log the error but continue with remaining models
             name = ModelClass.__name__
             print(f"Error while training {name} ({framework}): {exc}")
 
     print("Done. Metrics in", metrics_dir)
+    print("Checkpoints in", checkpoints_dir)
     return 0
 
 

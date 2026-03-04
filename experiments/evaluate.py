@@ -1,4 +1,4 @@
-"""Load metrics from results/metrics and print comparison table (Qiskit and PennyLane)."""
+"""Load metrics from the latest results/run_*/metrics and print comparison table."""
 import json
 import sys
 from pathlib import Path
@@ -9,9 +9,24 @@ if str(ROOT) not in sys.path:
 
 
 def main():
-    metrics_dir = ROOT / "results" / "metrics"
+    base_results = ROOT / "results"
+    if not base_results.exists():
+        print("No results directory. Run train_all.py first.")
+        return 1
+
+    # Find the most recent run_* directory
+    run_dirs = sorted(
+        [p for p in base_results.iterdir() if p.is_dir() and p.name.startswith("run_")],
+        key=lambda p: p.name,
+    )
+    if not run_dirs:
+        print("No run_* directories found under results. Run train_all.py first.")
+        return 1
+
+    latest_run = run_dirs[-1]
+    metrics_dir = latest_run / "metrics"
     if not metrics_dir.exists():
-        print("No results/metrics dir. Run train_all.py first.")
+        print(f"No metrics directory in latest run: {latest_run}")
         return 1
     rows = []
     for p in metrics_dir.glob("*_metrics.json"):

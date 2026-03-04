@@ -3,9 +3,11 @@ PennyLane implementations of QSVM, VQC, QMLP, QNN.
 Same BaseQuantumClassifier interface as Qiskit models.
 Uses PennyLane's differentiable numpy so the autograd graph is preserved for VQC/QMLP/QNN.
 """
+import pickle
 import warnings
-from typing import Any, Dict, Optional
 from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import numpy as np_standard  # for sklearn and final .astype(np.int64)
 import pennylane as qml
@@ -157,6 +159,36 @@ class PennyLaneQSVM(BaseQuantumClassifier):
             **self._kwargs,
         }
 
+    def save(self, path: Path) -> None:
+        """Save QSVM state (hyperparameters, training data, and SVC)."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "type": self.name,
+            "params": self.get_params(),
+            "X_train": np_standard.asarray(self._X_train) if self._X_train is not None else None,
+            "svc": self._svc,
+        }
+        with open(path, "wb") as f:
+            pickle.dump(state, f)
+
+    def load(self, path: Path) -> "PennyLaneQSVM":
+        """Load QSVM state and rebuild kernel for prediction."""
+        path = Path(path)
+        with open(path, "rb") as f:
+            state = pickle.load(f)
+
+        params = state.get("params", {})
+        for key, value in params.items():
+            setattr(self, key, value)
+
+        X_train = state.get("X_train")
+        self._X_train = X_train
+        if X_train is not None:
+            self._build_kernel(X_train.shape[1])
+        self._svc = state.get("svc")
+        return self
+
 
 class _BasePennyLaneVariational(BaseQuantumClassifier, ABC):
     """Shared training logic for PennyLane variational classifiers (VQC, QMLP, QNN)."""
@@ -168,6 +200,10 @@ class _BasePennyLaneVariational(BaseQuantumClassifier, ABC):
         shots: Optional[int] = None,
         max_iter: int = 100,
         step_size: float = 0.1,
+        # Early stopping (for variational models) – off by default for stability
+        early_stopping: bool = False,
+        patience: int = 15,
+        min_delta: float = 1e-4,
         random_state: Optional[int] = None,
         **kwargs: Any,
     ):
@@ -176,6 +212,9 @@ class _BasePennyLaneVariational(BaseQuantumClassifier, ABC):
         self.shots = shots
         self.max_iter = max_iter
         self.step_size = step_size
+        self.early_stopping = early_stopping
+        self.patience = patience
+        self.min_delta = min_delta
         self.random_state = random_state
         self._kwargs = kwargs
         self._dev = None
@@ -221,6 +260,10 @@ class _BasePennyLaneVariational(BaseQuantumClassifier, ABC):
         rng = np_standard.random.default_rng(self.random_state)
         opt = qml.GradientDescentOptimizer(stepsize=self.step_size)
 
+        best_loss = None
+        best_weights = None
+        epochs_no_improve = 0
+
         for step in range(self.max_iter):
             batch_idx = rng.integers(0, len(X), size=batch_size)
             X_batch = X[batch_idx]
@@ -232,7 +275,26 @@ class _BasePennyLaneVariational(BaseQuantumClassifier, ABC):
                 return _mse_loss(preds, y_batch)
 
             self._weights, curr_loss = opt.step_and_cost(cost, self._weights)
-            print(f"{self.name}: step {step + 1}/{self.max_iter}, loss={float(curr_loss):.6f}")
+            curr_loss_val = float(curr_loss)
+            print(f"{self.name}: step {step + 1}/{self.max_iter}, loss={curr_loss_val:.6f}")
+
+            if self.early_stopping:
+                if best_loss is None or curr_loss_val < best_loss - self.min_delta:
+                    best_loss = curr_loss_val
+                    # Keep a copy of the best weights seen so far
+                    best_weights = np.array(self._weights)
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+                    if epochs_no_improve >= self.patience:
+                        # Restore best weights before stopping
+                        if best_weights is not None:
+                            self._weights = best_weights
+                        print(
+                            f"{self.name}: early stopping at step {step + 1} "
+                            f"(best_loss={best_loss:.6f}, patience={self.patience})"
+                        )
+                        break
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -249,9 +311,50 @@ class _BasePennyLaneVariational(BaseQuantumClassifier, ABC):
             "shots": self.shots,
             "max_iter": self.max_iter,
             "step_size": self.step_size,
+            "early_stopping": self.early_stopping,
+            "patience": self.patience,
+            "min_delta": self.min_delta,
             "random_state": self.random_state,
             **self._kwargs,
         }
+
+    def save(self, path: Path) -> None:
+        """Save variational model state (hyperparameters and weights)."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "type": self.name,
+            "params": self.get_params(),
+            "n_classes": self._n_classes,
+            "n_features": self._n_features,
+            "weights": np_standard.asarray(self._weights) if self._weights is not None else None,
+        }
+        with open(path, "wb") as f:
+            pickle.dump(state, f)
+
+    def load(self, path: Path) -> "_BasePennyLaneVariational":
+        """Load variational model state and rebuild circuit for prediction."""
+        path = Path(path)
+        with open(path, "rb") as f:
+            state = pickle.load(f)
+
+        params = state.get("params", {})
+        for key, value in params.items():
+            setattr(self, key, value)
+
+        self._n_classes = state.get("n_classes")
+        self._n_features = state.get("n_features")
+
+        if self._n_classes is not None and self._n_features is not None:
+            n_wires = max(self.n_qubits, self._n_classes)
+            self._dev = _default_device(n_wires, self.shots)
+            n_feat = min(self._n_features, n_wires)
+            self._circuit = self._build_qnode(n_wires, n_feat, self._n_classes)
+
+        weights_arr = state.get("weights")
+        if weights_arr is not None:
+            self._weights = np.array(weights_arr, requires_grad=True)
+        return self
 
 
 # --- PennyLane VQC: variational circuit, multi-class via n_classes expectations ---
