@@ -1,0 +1,39 @@
+## Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+## Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+## Data files (large datasets, raw/processed exports)
+*.parquet
+*.csv
+*.tsv
+*.log
+*.zip
+
+## Results, checkpoints, and experiment outputs
+results/
+checkpoints/
+outputs/
+
+## IDE / editor config
+.vscode/
+.idea/
+*.code-workspace
+
+## OS / miscellaneous
+.DS_Store
+Thumbs.db
+
+## Cursor / local tools
+.cursor/
+

@@ -1,0 +1,36 @@
+# CIC IoMT 2024 - Quantum model comparison (QSVM, VQC, QMLP, QNN)
+
+# Framework: "pennylane" or "qiskit" (both can be run; set which to use per run)
+framework: "pennylane"
+
+# Data: prefer Parquet, fallback to CSV
+data_dir: "CIC_iomt_dataset"
+train_file: "CIC_IoMT_2024_WiFi_MQTT_train.parquet"
+test_file: "CIC_IoMT_2024_WiFi_MQTT_test.parquet"
+label_column: "label"
+
+# Subsample for faster runs (set to null for full dataset)
+# Use small subsets while experimenting; increase later if needed.
+n_train: 500
+n_test: 200
+
+# Preprocessing: PCA components. Should match n_qubits so all features are used (circuits encode min(n_components, n_qubits) features).
+# null = no PCA, use all features (may be slow / memory-heavy)
+n_components: 4
+
+# Quantum circuit
+n_qubits: 4
+reps: 2
+backend: "qasm_simulator"
+shots: 1024
+
+# Training
+random_state: 42
+max_iter: 100
+optimizer: "COBYLA"
+step_size: 0.1   # for PennyLane gradient-based optimizers
+
+# Results
+results_dir: "results"
+metrics_dir: "results/metrics"
+checkpoints_dir: "results/checkpoints"
