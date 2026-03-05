@@ -239,6 +239,14 @@ class _BasePennyLaneVariational(BaseQuantumClassifier, ABC):
         ...
 
     def fit(self, X: np.ndarray, y: np.ndarray, **kwargs: Any) -> "_BasePennyLaneVariational":
+        """Train variational models using epoch-based mini-batch gradient descent.
+
+        This implementation ensures that each epoch sweeps over (almost) the entire
+        training set once by iterating over shuffled mini-batches. The config
+        parameter ``max_iter`` is interpreted as the *maximum number of epochs*,
+        but we cap it to a small value (e.g. 10) to avoid extremely long runs
+        on large datasets.
+        """
         self._n_classes = int(np_standard.max(y)) + 1
         self._n_features = X.shape[1]
         n_wires = max(self.n_qubits, self._n_classes)
@@ -256,45 +264,52 @@ class _BasePennyLaneVariational(BaseQuantumClassifier, ABC):
         self._circuit = self._build_qnode(n_wires, n_feat, self._n_classes)
         self._weights = self._init_weights(n_wires)
 
-        batch_size = min(32, len(X))
-        rng = np_standard.random.default_rng(self.random_state)
+        n_samples = len(X)
+        batch_size = min(32, n_samples)
         opt = qml.GradientDescentOptimizer(stepsize=self.step_size)
 
-        best_loss = None
-        best_weights = None
-        epochs_no_improve = 0
+        # Interpret max_iter as epochs, but cap to avoid excessively long runs
+        epochs = min(self.max_iter, 10)
+        steps_per_epoch = max(1, n_samples // batch_size)
 
-        for step in range(self.max_iter):
-            batch_idx = rng.integers(0, len(X), size=batch_size)
-            X_batch = X[batch_idx]
-            y_batch = y[batch_idx]
+        print(
+            f"{self.name}: Training for {epochs} epochs, "
+            f"batch_size={batch_size}, steps_per_epoch={steps_per_epoch} "
+            f"(n_samples={n_samples})"
+        )
 
-            def cost(weights):
-                preds_list = [self._circuit(x, weights) for x in X_batch]
-                preds = np.stack(preds_list, axis=0)
-                return _mse_loss(preds, y_batch)
+        rng = np_standard.random.default_rng(self.random_state)
 
-            self._weights, curr_loss = opt.step_and_cost(cost, self._weights)
-            curr_loss_val = float(curr_loss)
-            print(f"{self.name}: step {step + 1}/{self.max_iter}, loss={curr_loss_val:.6f}")
+        for epoch in range(epochs):
+            # Shuffle data at the start of each epoch
+            indices = rng.permutation(n_samples)
+            X_shuffled = X[indices]
+            y_shuffled = y[indices]
 
-            if self.early_stopping:
-                if best_loss is None or curr_loss_val < best_loss - self.min_delta:
-                    best_loss = curr_loss_val
-                    # Keep a copy of the best weights seen so far
-                    best_weights = np.array(self._weights)
-                    epochs_no_improve = 0
-                else:
-                    epochs_no_improve += 1
-                    if epochs_no_improve >= self.patience:
-                        # Restore best weights before stopping
-                        if best_weights is not None:
-                            self._weights = best_weights
-                        print(
-                            f"{self.name}: early stopping at step {step + 1} "
-                            f"(best_loss={best_loss:.6f}, patience={self.patience})"
-                        )
-                        break
+            epoch_loss = 0.0
+
+            for step in range(steps_per_epoch):
+                start_idx = step * batch_size
+                end_idx = start_idx + batch_size
+                if start_idx >= n_samples:
+                    break
+                X_batch = X_shuffled[start_idx:end_idx]
+                y_batch = y_shuffled[start_idx:end_idx]
+
+                def cost(weights):
+                    preds_list = [self._circuit(x, weights) for x in X_batch]
+                    preds = np.stack(preds_list, axis=0)
+                    return _mse_loss(preds, y_batch)
+
+                self._weights, curr_loss = opt.step_and_cost(cost, self._weights)
+                epoch_loss += float(curr_loss)
+
+            avg_epoch_loss = epoch_loss / steps_per_epoch
+            print(
+                f"{self.name}: epoch {epoch + 1}/{epochs}, "
+                f"avg_loss={avg_epoch_loss:.6f}"
+            )
+
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:

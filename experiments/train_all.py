@@ -53,7 +53,8 @@ def main():
     # Create per-run timestamped directory under results/
     base_results = ROOT / cfg.get("results_dir", "results")
     base_results.mkdir(parents=True, exist_ok=True)
-    run_id = time.strftime("run_%Y%m%d_%H%M%S")
+    # Timestamp format: date_hour_minute (24h) for readability, e.g. run_20260304_2310
+    run_id = time.strftime("run_%Y%m%d_%H%M")
     run_dir = base_results / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 

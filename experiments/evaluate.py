@@ -14,7 +14,7 @@ def main():
         print("No results directory. Run train_all.py first.")
         return 1
 
-    # Find the most recent run_* directory
+    # Find the most recent run_* directory (sorted lexicographically; names embed date+time)
     run_dirs = sorted(
         [p for p in base_results.iterdir() if p.is_dir() and p.name.startswith("run_")],
         key=lambda p: p.name,
